@@ -261,6 +261,21 @@ function getDateRange(period, cr, weekSel) {
 const parseDate = val => { if(!val) return null; const num=Number(val); if(!isNaN(num)&&num>40000) return new Date((num-25569)*86400*1000); const d=new Date(val); return isNaN(d)?null:d; };
 const parseDateToStr = val => { const d=parseDate(val); return d ? d.toISOString().split("T")[0] : null; };
 
+// Convert any date value to YYYY-MM-DD string for Supabase (handles Excel serials, strings, Date objects)
+const toSupaDate = val => {
+  if (!val) return null;
+  // Excel serial number (e.g. 45678)
+  const num = Number(val);
+  if (!isNaN(num) && num > 40000 && num < 60000) {
+    const d = new Date((num - 25569) * 86400 * 1000);
+    return d.toISOString().split("T")[0];
+  }
+  // Already a string — try parsing
+  const d = new Date(val);
+  if (!isNaN(d)) return d.toISOString().split("T")[0];
+  return null;
+};
+
 function parseSheet(wb, sheetName, cols) {
   const ws = wb.Sheets[sheetName]; if(!ws) return [];
   return window.XLSX.utils.sheet_to_json(ws,{defval:""}).map(r => {
@@ -1244,11 +1259,11 @@ function AdminPage({hier,userRows,mappingRows,cloneRows,onOrgUpload,rR,onRR,eR,o
       const cRows=parseSheet(wb,"Cost",COST_COLS).filter(r=>r.Facility_ID);
       onRR(rRows);onER(eRows);onLR(lRows);onEfR(efRows);onCR(cRows);
       flash("⏳ Pushing metrics to database… this may take a minute for large files.");
-      const toRel =rRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,breach_base:r.Breach_Base||null,ncd_breach_actual:r.NCD_Breach_Actual||null,cd_breach_actual:r.CD_Breach_Actual||null,total_breach_actual:r.Total_Breach_Actual||null,repromise_breach_base:r.Repromise_Breach_Base||null,repromise_breach_actual:r.Repromise_Breach_Actual||null,ipd2_base:r.IPD2_Base||null,ipd2_actual:r.IPD2_Actual||null}));
-      const toExp =eRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,fwd_closure:r.Fwd_Closure||null,fwd_escalations:r.Fwd_Escalations||null,rev_closure:r.Rev_Closure||null,rev_escalations:r.Rev_Escalations||null,escalations:r.Escalations||null,escalations_base:r.Escalations_Base||null,cxns:r.CXNS||null,cxns_base:r.CXNS_Base||null,d2pickup:r.D2Pickup||null,total_pickup:r.Total_Pickup||null}));
-      const toLoss=lRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,prc_eligible:r.PRC_Eligible||null,prc_done:r.PRC_Done||null,pickup_loss:r.Pickup_Loss||null,logistics_loss:r.Logistics_Loss||null,fraud_loss:r.Fraud_Loss||null}));
-      const toEff =efRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,ofd:r.OFD||null,ofd_8:r.OFD_8||null,ofd_10:r.OFD_10||null,delivered:r.Delivered||null,unique_wm:r.Unique_WM||null,otrs_live:r.OTRS_Live||null,otrs_eligible:r.OTRS_Eligible||null,otrs_shipments:r.OTRS_Shipments||null,total_shipments:r.Total_Shipments||null}));
-      const toCost=cRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,hi_arrival:r.HI_Arrival||null,hmt_actual:r.HMT_Actual||null,van_ofd:r.Van_OFD||null,total_vans:r.Total_Vans||null}));
+      const toRel =rRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:toSupaDate(r.Date),breach_base:r.Breach_Base||null,ncd_breach_actual:r.NCD_Breach_Actual||null,cd_breach_actual:r.CD_Breach_Actual||null,total_breach_actual:r.Total_Breach_Actual||null,repromise_breach_base:r.Repromise_Breach_Base||null,repromise_breach_actual:r.Repromise_Breach_Actual||null,ipd2_base:r.IPD2_Base||null,ipd2_actual:r.IPD2_Actual||null}));
+      const toExp =eRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:toSupaDate(r.Date),fwd_closure:r.Fwd_Closure||null,fwd_escalations:r.Fwd_Escalations||null,rev_closure:r.Rev_Closure||null,rev_escalations:r.Rev_Escalations||null,escalations:r.Escalations||null,escalations_base:r.Escalations_Base||null,cxns:r.CXNS||null,cxns_base:r.CXNS_Base||null,d2pickup:r.D2Pickup||null,total_pickup:r.Total_Pickup||null}));
+      const toLoss=lRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:toSupaDate(r.Date),prc_eligible:r.PRC_Eligible||null,prc_done:r.PRC_Done||null,pickup_loss:r.Pickup_Loss||null,logistics_loss:r.Logistics_Loss||null,fraud_loss:r.Fraud_Loss||null}));
+      const toEff =efRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:toSupaDate(r.Date),ofd:r.OFD||null,ofd_8:r.OFD_8||null,ofd_10:r.OFD_10||null,delivered:r.Delivered||null,unique_wm:r.Unique_WM||null,otrs_live:r.OTRS_Live||null,otrs_eligible:r.OTRS_Eligible||null,otrs_shipments:r.OTRS_Shipments||null,total_shipments:r.Total_Shipments||null}));
+      const toCost=cRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:toSupaDate(r.Date),hi_arrival:r.HI_Arrival||null,hmt_actual:r.HMT_Actual||null,van_ofd:r.Van_OFD||null,total_vans:r.Total_Vans||null}));
       await supaReplace("reliability",toRel);
       await supaReplace("experience",toExp);
       await supaReplace("loss",toLoss);
@@ -1257,7 +1272,7 @@ function AdminPage({hier,userRows,mappingRows,cloneRows,onOrgUpload,rR,onRR,eR,o
       let msg="✅ "+rRows.length+" Rel, "+eRows.length+" Exp, "+lRows.length+" Loss, "+efRows.length+" Eff, "+cRows.length+" Cost rows saved to database.";
       if(wb.SheetNames.includes("Targets")){
         const tRows=parseSheet(wb,"Targets",TARGET_COLS).filter(r=>r.Facility_ID&&r.Metric_Name);
-        const toTgt=tRows.map(r=>({facility_id:r.Facility_ID,metric_name:r.Metric_Name,target_value:r.Target_Value||null,effective_from:r.Effective_From||null,effective_to:r.Effective_To||null}));
+        const toTgt=tRows.map(r=>({facility_id:r.Facility_ID,metric_name:r.Metric_Name,target_value:r.Target_Value||null,effective_from:toSupaDate(r.Effective_From),effective_to:toSupaDate(r.Effective_To)}));
         await supaReplace("targets",toTgt);
         onTR(tRows); msg+=" "+tRows.length+" targets saved.";
       }
