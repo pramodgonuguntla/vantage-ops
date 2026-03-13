@@ -60,19 +60,34 @@ async function supaFetchAll(table) {
 
 // Delete all rows from a table then insert new ones in batches
 async function supaReplace(table, rows) {
-  // Delete all existing rows
-  const del = await fetch(`${SUPA_URL}/rest/v1/${table}?id=gte.0`, { method: "DELETE", headers: supaHdr });
-  if (!del.ok) throw new Error(`Failed to clear ${table}: ${del.status}`);
+  // Delete all rows — use id=gte.0 for tables with numeric ids
+  // Use Prefer: return=minimal to avoid issues with empty tables
+  const delRes = await fetch(`${SUPA_URL}/rest/v1/${table}?id=gte.0`, {
+    method: "DELETE",
+    headers: { ...supaHdr, "Prefer": "return=minimal" }
+  });
+  // 404 on delete just means table was empty — that's fine
+  if (!delRes.ok && delRes.status !== 404) {
+    const t = await delRes.text();
+    throw new Error(`Failed to clear ${table} (${delRes.status}): ${t}`);
+  }
   if (!rows.length) return;
-  // Insert in batches of 500
-  const batchSize = 500;
+  // Insert in batches of 200 (safer for large rows)
+  const batchSize = 200;
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
     const ins = await fetch(`${SUPA_URL}/rest/v1/${table}`, {
-      method: "POST", headers: { ...supaHdr, "Prefer": "return=minimal" },
+      method: "POST",
+      headers: { ...supaHdr, "Prefer": "return=minimal" },
       body: JSON.stringify(batch)
     });
-    if (!ins.ok) { const t = await ins.text(); throw new Error(`Failed to insert into ${table}: ${ins.status} ${t}`); }
+    if (!ins.ok) {
+      const t = await ins.text();
+      // Parse Supabase error for a cleaner message
+      let detail = t;
+      try { const j = JSON.parse(t); detail = j.message || j.details || j.hint || t; } catch(e) {}
+      throw new Error(`${table} upload failed: ${detail}`);
+    }
   }
 }
 
