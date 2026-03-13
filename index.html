@@ -1465,7 +1465,9 @@ function AdminPage({hier,userRows,mappingRows,cloneRows,onOrgUpload,rR,onRR,eR,o
 // ─── Root App ─────────────────────────────────────────────────────────────────
 function App() {
   const xlsxReady = useXLSX();
-  const [user,setUser]=useState(null);
+  const [user,setUser]=useState(()=>{
+    try { const s=localStorage.getItem("vo_session"); return s?JSON.parse(s):null; } catch(e){ return null; }
+  });
   const [login,setLogin]=useState({email:"",password:""});
   const [loginErr,setLoginErr]=useState("");
   const [mainTab,setMainTab]=useState("dashboard");
@@ -1505,6 +1507,16 @@ function App() {
 
   const handleOrgUpload=(uR,mR,cR2)=>{ setUserRows(uR); setMappingRows(mR); setCloneRows(cR2); const built=buildHierarchyFromUsers(uR); if(built) setHier(built); };
 
+  // Inject keyframe for pulse animation
+  useEffect(()=>{
+    const id="vo-styles";
+    if (!document.getElementById(id)) {
+      const s=document.createElement("style"); s.id=id;
+      s.textContent="@keyframes vo-pulse{0%,100%{opacity:1}50%{opacity:.3}}";
+      document.head.appendChild(s);
+    }
+  },[]);
+
   // Phase 1: load org data only on mount (small tables — fast)
   const [orgLoading, setOrgLoading] = useState(true);
   const [orgErr, setOrgErr] = useState("");
@@ -1526,7 +1538,15 @@ function App() {
         setOrgLoading(false);
       }
     })();
-  },[]);
+  },[]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After org loads, re-trigger metrics fetch for session-restored user
+  useEffect(()=>{
+    if (orgLoading) return; // wait for org to finish
+    const saved = (() => { try { const s=localStorage.getItem("vo_session"); return s?JSON.parse(s):null; } catch(e){ return null; } })();
+    if (!saved || saved.id===BOOTSTRAP_ADMIN.id) return;
+    fetchMetricsForPeriod(saved.id, hier, hiMap, dr);
+  },[orgLoading]);
 
   // Phase 2: after login, fetch metrics scoped to user's hubs + current period
   const [metricsLoading, setMetricsLoading] = useState(false);
@@ -1574,23 +1594,25 @@ function App() {
   const doLogin=()=>{
     const email=login.email.trim().toLowerCase(), pw=login.password.trim();
     if(!email||!pw){setLoginErr("Enter email and password.");return;}
-    if(email===BOOTSTRAP_ADMIN.email&&pw===BOOTSTRAP_ADMIN.password){setUser(BOOTSTRAP_ADMIN);setLoginErr("");return;}
+    if(email===BOOTSTRAP_ADMIN.email&&pw===BOOTSTRAP_ADMIN.password){setUser(BOOTSTRAP_ADMIN);try{localStorage.setItem("vo_session",JSON.stringify(BOOTSTRAP_ADMIN));}catch(e){}setLoginErr("");return;}
     const clone=cloneMap[email];
     if(clone){
       const res=resolveClone(email); if(!res){setLoginErr("Access not configured.");return;}
       const n=hier[res.cloneId]; if(!n){setLoginErr("Cloned user not in hierarchy.");return;}
       const u={email,name:res.displayName,id:res.cloneId,role:n.title,isCloned:true,cloneOf:res.cloneEmail,hasAdminAccess:res.isAdmin,hasDashAccess:true};
-      setUser(u); setLoginErr("");
+      setUser(u); try{localStorage.setItem("vo_session",JSON.stringify(u));}catch(e){} setLoginErr("");
       fetchMetricsForPeriod(res.cloneId, hier, hiMap, dr);
       return;
     }
     const empId=emailToId(email), node=hier[empId];
     if(!node){setLoginErr("Invalid email or password.");return;}
-    setUser({email,name:node.name,id:empId,role:node.title,hasAdminAccess:false,hasDashAccess:true}); setLoginErr("");
+    const u2={email,name:node.name,id:empId,role:node.title,hasAdminAccess:false,hasDashAccess:true};
+    setUser(u2); try{localStorage.setItem("vo_session",JSON.stringify(u2));}catch(e){} setLoginErr("");
     fetchMetricsForPeriod(empId, hier, hiMap, dr);
   };
 
   const doLogout=()=>{
+    try{localStorage.removeItem("vo_session");}catch(e){}
     setUser(null); setLogin({email:"",password:""}); setMainTab("dashboard");
     // Clear cached metrics on logout so next login fetches fresh
     fetchedCache.current = {};
@@ -1658,8 +1680,9 @@ function App() {
         </div>
         <div style={{display:"flex",alignItems:"center",gap:7}}>
           {showBoth&&(<div style={{display:"flex",background:"#f3f4f6",borderRadius:7,padding:2,gap:2}}>{[{k:"dashboard",l:"📊 Dashboard"},{k:"admin",l:"⚙️ Admin"}].map(({k,l})=>(<button key={k} onClick={()=>setMainTab(k)} style={{padding:"4px 12px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:500,background:mainTab===k?"#fff":"transparent",color:mainTab===k?"#2563eb":"#6b7280",boxShadow:mainTab===k?"0 1px 3px rgba(0,0,0,.1)":"none"}}>{l}</button>))}</div>)}
-          {metricsLoading&&<span style={{padding:"1px 9px",borderRadius:99,fontSize:10,fontWeight:600,background:"#fef9c3",color:"#854d0e"}}>⏳ Loading data…</span>}
-          {metricsErr&&<span style={{padding:"1px 9px",borderRadius:99,fontSize:10,fontWeight:600,background:"#fee2e2",color:"#dc2626"}} title={metricsErr}>⚠️ Data error</span>}
+          {metricsLoading&&<span style={{padding:"3px 10px",borderRadius:99,fontSize:10,fontWeight:600,background:"#fef9c3",color:"#854d0e",display:"flex",alignItems:"center",gap:4}}><span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:"#d97706",animation:"vo-pulse 1.2s infinite"}}>​</span>Fetching data…</span>}
+          {!metricsLoading&&rR.length>0&&<span style={{padding:"3px 10px",borderRadius:99,fontSize:10,fontWeight:600,background:"#dcfce7",color:"#16a34a"}}>✓ Data ready</span>}
+          {metricsErr&&<span style={{padding:"3px 10px",borderRadius:99,fontSize:10,fontWeight:600,background:"#fee2e2",color:"#dc2626",cursor:"pointer"}} title={metricsErr} onClick={()=>fetchMetricsForPeriod(user.id,hier,hiMap,dr)}>⚠ Retry</span>}
           {isAdmin&&<span style={{padding:"1px 9px",borderRadius:99,fontSize:10,fontWeight:700,background:"#dbeafe",color:"#2563eb"}}>ADMIN</span>}
           <Avatar name={user.name} size={28}/>
           <span style={{fontSize:12,fontWeight:500,color:"#374151"}}>{user.name}</span>
