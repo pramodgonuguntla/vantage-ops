@@ -44,11 +44,31 @@ const SUPA_URL = "https://cdrobyxxavlgidpvfchc.supabase.co";
 const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkcm9ieXh4YXZsZ2lkcHZmY2hjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMzNTc4NzksImV4cCI6MjA4ODkzMzg3OX0.FXiyzDE3qKkyGZZT1_Fni8i2y04tPQl_2slbraFBY-c";
 const supaHdr = { "Content-Type": "application/json", "apikey": SUPA_KEY, "Authorization": "Bearer " + SUPA_KEY, "Prefer": "return=minimal" };
 
-// Fetch all rows from a Supabase table (handles pagination — 1000 row limit per request)
+// Fetch all rows from a table (paginated, no filter — for small org tables)
 async function supaFetchAll(table) {
   let all = [], from = 0, pageSize = 1000;
   while (true) {
     const res = await fetch(`${SUPA_URL}/rest/v1/${table}?select=*&order=id.asc&offset=${from}&limit=${pageSize}`, { headers: supaHdr });
+    if (!res.ok) throw new Error(`Failed to fetch ${table}: ${res.status}`);
+    const rows = await res.json();
+    all = all.concat(rows);
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
+// Fetch metric rows scoped to specific facility_ids and date range
+// fids: Set of facility_id strings, dateFrom/dateTo: "YYYY-MM-DD" strings
+async function supaFetchMetrics(table, fids, dateFrom, dateTo) {
+  if (!fids || fids.size === 0) return [];
+  const fidList = [...fids].join(",");
+  let all = [], from = 0, pageSize = 1000;
+  // Supabase filter: facility_id in (list) AND date >= from AND date <= to
+  const filter = `facility_id=in.(${fidList})&date=gte.${dateFrom}&date=lte.${dateTo}`;
+  while (true) {
+    const url = `${SUPA_URL}/rest/v1/${table}?select=*&${filter}&order=date.asc&offset=${from}&limit=${pageSize}`;
+    const res = await fetch(url, { headers: supaHdr });
     if (!res.ok) throw new Error(`Failed to fetch ${table}: ${res.status}`);
     const rows = await res.json();
     all = all.concat(rows);
@@ -1485,46 +1505,71 @@ function App() {
 
   const handleOrgUpload=(uR,mR,cR2)=>{ setUserRows(uR); setMappingRows(mR); setCloneRows(cR2); const built=buildHierarchyFromUsers(uR); if(built) setHier(built); };
 
-  // Load org + metrics from Supabase on first mount
-  const [dbLoading, setDbLoading] = useState(true);
-  const [dbStatus, setDbStatus] = useState("Loading data…");
+  // Phase 1: load org data only on mount (small tables — fast)
+  const [orgLoading, setOrgLoading] = useState(true);
+  const [orgErr, setOrgErr] = useState("");
   useEffect(()=>{
     (async()=>{
       try {
-        setDbStatus("Loading organisation data…");
         const [empRows, mapRows, cloneRows2] = await Promise.all([
           supaFetchAll("employees"),
           supaFetchAll("hi_hub_mapping"),
           supaFetchAll("access_cloning"),
         ]);
-        const uR    = empRows.map(r=>snakeToApp(r,EMP_MAP));
-        const mR    = mapRows.map(r=>snakeToApp(r,MAP_MAP));
-        const cR2   = cloneRows2.map(r=>snakeToApp(r,CLONE_MAP));
+        const uR  = empRows.map(r=>snakeToApp(r,EMP_MAP));
+        const mR  = mapRows.map(r=>snakeToApp(r,MAP_MAP));
+        const cR2 = cloneRows2.map(r=>snakeToApp(r,CLONE_MAP));
         handleOrgUpload(uR, mR, cR2);
-
-        setDbStatus("Loading metrics data…");
-        const [relRows,expRows,lossRows,effRows,costRows,tgtRows] = await Promise.all([
-          supaFetchAll("reliability"),
-          supaFetchAll("experience"),
-          supaFetchAll("loss"),
-          supaFetchAll("efficiency"),
-          supaFetchAll("cost"),
-          supaFetchAll("targets"),
-        ]);
-        setRR(relRows.map(r=>snakeToApp(r,REL_MAP)));
-        setER(expRows.map(r=>snakeToApp(r,EXP_MAP)));
-        setLR(lossRows.map(r=>snakeToApp(r,LOSS_MAP)));
-        setEfR(effRows.map(r=>snakeToApp(r,EFF_MAP)));
-        setCR(costRows.map(r=>snakeToApp(r,COST_MAP)));
-        setTR(tgtRows.map(r=>snakeToApp(r,TGT_MAP)));
-        setDbStatus("Ready");
       } catch(err) {
-        setDbStatus("⚠️ Could not load from database: "+err.message);
+        setOrgErr("Could not load org data: "+err.message);
       } finally {
-        setDbLoading(false);
+        setOrgLoading(false);
       }
     })();
   },[]);
+
+  // Phase 2: after login, fetch metrics scoped to user's hubs + current period
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [metricsErr, setMetricsErr] = useState("");
+  // Cache fetched periods so switching back doesn't re-fetch: key = "period|from|to"
+  const fetchedCache = useRef({});
+
+  const fetchMetricsForPeriod = useCallback(async (userNodeId, hierRef, hiMapRef, dr) => {
+    if (!userNodeId || !dr) return;
+    const fromStr = dr.from.toISOString().split("T")[0];
+    const toStr   = dr.to.toISOString().split("T")[0];
+    const cacheKey = `${userNodeId}|${fromStr}|${toStr}`;
+    if (fetchedCache.current[cacheKey]) return; // already fetched
+    fetchedCache.current[cacheKey] = true;
+
+    const fids = new Set(getFacilitiesForNode(userNodeId, hierRef, hiMapRef).map(f=>String(f).trim()));
+    if (!fids.size) return;
+
+    setMetricsLoading(true);
+    setMetricsErr("");
+    try {
+      const [relRows,expRows,lossRows,effRows,costRows,tgtRows] = await Promise.all([
+        supaFetchMetrics("reliability", fids, fromStr, toStr),
+        supaFetchMetrics("experience",  fids, fromStr, toStr),
+        supaFetchMetrics("loss",        fids, fromStr, toStr),
+        supaFetchMetrics("efficiency",  fids, fromStr, toStr),
+        supaFetchMetrics("cost",        fids, fromStr, toStr),
+        supaFetchAll("targets"),
+      ]);
+      // Merge into existing state (append, don't replace — keeps other periods cached)
+      setRR(prev => { const existing=new Set(prev.map(r=>r.Facility_ID+r.Date)); return [...prev, ...relRows.map(r=>snakeToApp(r,REL_MAP)).filter(r=>!existing.has(r.Facility_ID+r.Date))]; });
+      setER(prev => { const existing=new Set(prev.map(r=>r.Facility_ID+r.Date)); return [...prev, ...expRows.map(r=>snakeToApp(r,EXP_MAP)).filter(r=>!existing.has(r.Facility_ID+r.Date))]; });
+      setLR(prev => { const existing=new Set(prev.map(r=>r.Facility_ID+r.Date)); return [...prev, ...lossRows.map(r=>snakeToApp(r,LOSS_MAP)).filter(r=>!existing.has(r.Facility_ID+r.Date))]; });
+      setEfR(prev => { const existing=new Set(prev.map(r=>r.Facility_ID+r.Date)); return [...prev, ...effRows.map(r=>snakeToApp(r,EFF_MAP)).filter(r=>!existing.has(r.Facility_ID+r.Date))]; });
+      setCR(prev => { const existing=new Set(prev.map(r=>r.Facility_ID+r.Date)); return [...prev, ...costRows.map(r=>snakeToApp(r,COST_MAP)).filter(r=>!existing.has(r.Facility_ID+r.Date))]; });
+      setTR(tgtRows.map(r=>snakeToApp(r,TGT_MAP)));
+    } catch(err) {
+      setMetricsErr("Could not load metrics: "+err.message);
+      fetchedCache.current[cacheKey] = false; // allow retry
+    } finally {
+      setMetricsLoading(false);
+    }
+  }, []);
 
   const doLogin=()=>{
     const email=login.email.trim().toLowerCase(), pw=login.password.trim();
@@ -1534,14 +1579,29 @@ function App() {
     if(clone){
       const res=resolveClone(email); if(!res){setLoginErr("Access not configured.");return;}
       const n=hier[res.cloneId]; if(!n){setLoginErr("Cloned user not in hierarchy.");return;}
-      setUser({email,name:res.displayName,id:res.cloneId,role:n.title,isCloned:true,cloneOf:res.cloneEmail,hasAdminAccess:res.isAdmin,hasDashAccess:true}); setLoginErr(""); return;
+      const u={email,name:res.displayName,id:res.cloneId,role:n.title,isCloned:true,cloneOf:res.cloneEmail,hasAdminAccess:res.isAdmin,hasDashAccess:true};
+      setUser(u); setLoginErr("");
+      fetchMetricsForPeriod(res.cloneId, hier, hiMap, dr);
+      return;
     }
     const empId=emailToId(email), node=hier[empId];
     if(!node){setLoginErr("Invalid email or password.");return;}
     setUser({email,name:node.name,id:empId,role:node.title,hasAdminAccess:false,hasDashAccess:true}); setLoginErr("");
+    fetchMetricsForPeriod(empId, hier, hiMap, dr);
   };
 
-  const doLogout=()=>{setUser(null);setLogin({email:"",password:""});setMainTab("dashboard");};
+  const doLogout=()=>{
+    setUser(null); setLogin({email:"",password:""}); setMainTab("dashboard");
+    // Clear cached metrics on logout so next login fetches fresh
+    fetchedCache.current = {};
+    setRR([]); setER([]); setLR([]); setEfR([]); setCR([]); setTR([]);
+  };
+
+  // Re-fetch when period changes after login
+  useEffect(()=>{
+    if (!user || user.id===BOOTSTRAP_ADMIN.id) return;
+    fetchMetricsForPeriod(user.id, hier, hiMap, dr);
+  },[user, dr]);
 
   const today=new Date(); const yday=new Date(today); yday.setDate(today.getDate()-1);
   const getDateLabel=()=>{
@@ -1567,10 +1627,10 @@ function App() {
             <input type={type} value={login[key]} placeholder={ph} onChange={e=>setLogin(p=>({...p,[key]:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} style={{width:"100%",marginTop:3,padding:"9px 11px",border:"1px solid #e5e7eb",borderRadius:7,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
           </div>
         ))}
-        {dbLoading&&<div style={{fontSize:11,color:"#6b7280",textAlign:"center",marginBottom:8,padding:"6px 10px",background:"#f3f4f6",borderRadius:6}}>⏳ {dbStatus}</div>}
-        {!dbLoading&&dbStatus.startsWith("⚠️")&&<div style={{fontSize:11,color:"#dc2626",marginBottom:8,padding:"6px 10px",background:"#fef2f2",borderRadius:6}}>{dbStatus}</div>}
+        {orgLoading&&<div style={{fontSize:11,color:"#6b7280",textAlign:"center",marginBottom:8,padding:"6px 10px",background:"#f3f4f6",borderRadius:6}}>⏳ Loading organisation data…</div>}
+        {orgErr&&<div style={{fontSize:11,color:"#dc2626",marginBottom:8,padding:"6px 10px",background:"#fef2f2",borderRadius:6}}>⚠️ {orgErr}</div>}
         {loginErr&&<p style={{color:"#dc2626",fontSize:11,marginBottom:6}}>{loginErr}</p>}
-        <button onClick={doLogin} disabled={dbLoading} style={{width:"100%",padding:10,background:dbLoading?"#93c5fd":"#2563eb",color:"#fff",border:"none",borderRadius:7,fontSize:13,fontWeight:600,cursor:dbLoading?"not-allowed":"pointer",marginTop:6}}>{dbLoading?"Loading data…":"Sign In"}</button>
+        <button onClick={doLogin} disabled={orgLoading} style={{width:"100%",padding:10,background:orgLoading?"#93c5fd":"#2563eb",color:"#fff",border:"none",borderRadius:7,fontSize:13,fontWeight:600,cursor:orgLoading?"not-allowed":"pointer",marginTop:6}}>{orgLoading?"Loading…":"Sign In"}</button>
       </div>
     </div>
   );
@@ -1598,6 +1658,8 @@ function App() {
         </div>
         <div style={{display:"flex",alignItems:"center",gap:7}}>
           {showBoth&&(<div style={{display:"flex",background:"#f3f4f6",borderRadius:7,padding:2,gap:2}}>{[{k:"dashboard",l:"📊 Dashboard"},{k:"admin",l:"⚙️ Admin"}].map(({k,l})=>(<button key={k} onClick={()=>setMainTab(k)} style={{padding:"4px 12px",borderRadius:5,border:"none",cursor:"pointer",fontSize:11,fontWeight:500,background:mainTab===k?"#fff":"transparent",color:mainTab===k?"#2563eb":"#6b7280",boxShadow:mainTab===k?"0 1px 3px rgba(0,0,0,.1)":"none"}}>{l}</button>))}</div>)}
+          {metricsLoading&&<span style={{padding:"1px 9px",borderRadius:99,fontSize:10,fontWeight:600,background:"#fef9c3",color:"#854d0e"}}>⏳ Loading data…</span>}
+          {metricsErr&&<span style={{padding:"1px 9px",borderRadius:99,fontSize:10,fontWeight:600,background:"#fee2e2",color:"#dc2626"}} title={metricsErr}>⚠️ Data error</span>}
           {isAdmin&&<span style={{padding:"1px 9px",borderRadius:99,fontSize:10,fontWeight:700,background:"#dbeafe",color:"#2563eb"}}>ADMIN</span>}
           <Avatar name={user.name} size={28}/>
           <span style={{fontSize:12,fontWeight:500,color:"#374151"}}>{user.name}</span>
