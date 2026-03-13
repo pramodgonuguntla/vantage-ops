@@ -39,6 +39,56 @@ function useXLSX() {
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Supabase config ──────────────────────────────────────────────────────────
+const SUPA_URL = "https://cdrobyxxavlgidpvfchc.supabase.co";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkcm9ieXh4YXZsZ2lkcHZmY2hjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMzNTc4NzksImV4cCI6MjA4ODkzMzg3OX0.FXiyzDE3qKkyGZZT1_Fni8i2y04tPQl_2slbraFBY-c";
+const supaHdr = { "Content-Type": "application/json", "apikey": SUPA_KEY, "Authorization": "Bearer " + SUPA_KEY, "Prefer": "return=minimal" };
+
+// Fetch all rows from a Supabase table (handles pagination — 1000 row limit per request)
+async function supaFetchAll(table) {
+  let all = [], from = 0, pageSize = 1000;
+  while (true) {
+    const res = await fetch(`${SUPA_URL}/rest/v1/${table}?select=*&order=id.asc&offset=${from}&limit=${pageSize}`, { headers: supaHdr });
+    if (!res.ok) throw new Error(`Failed to fetch ${table}: ${res.status}`);
+    const rows = await res.json();
+    all = all.concat(rows);
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
+// Delete all rows from a table then insert new ones in batches
+async function supaReplace(table, rows) {
+  // Delete all existing rows
+  const del = await fetch(`${SUPA_URL}/rest/v1/${table}?id=gte.0`, { method: "DELETE", headers: supaHdr });
+  if (!del.ok) throw new Error(`Failed to clear ${table}: ${del.status}`);
+  if (!rows.length) return;
+  // Insert in batches of 500
+  const batchSize = 500;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const ins = await fetch(`${SUPA_URL}/rest/v1/${table}`, {
+      method: "POST", headers: { ...supaHdr, "Prefer": "return=minimal" },
+      body: JSON.stringify(batch)
+    });
+    if (!ins.ok) { const t = await ins.text(); throw new Error(`Failed to insert into ${table}: ${ins.status} ${t}`); }
+  }
+}
+
+// Normalise a Supabase row (snake_case keys → app format)
+const snakeToApp = (row, colMap) => { const o = {}; Object.entries(colMap).forEach(([db, app]) => { o[app] = row[db] != null ? String(row[db]) : ""; }); return o; };
+
+const EMP_MAP    = {emp_name:"Emp_Name",emp_designation:"Emp_Designation",emp_email:"Emp_Email",manager_name:"Manager_Name",manager_designation:"Manager_Designation",manager_email:"Manager_Email"};
+const MAP_MAP    = {hi_name:"HI_Name",hi_email:"HI_Email",hub_name:"Hub_Name",facility_id:"Facility_ID"};
+const CLONE_MAP  = {emp_name:"Emp_Name",designation:"Designation",emp_email:"Emp_Email",clone_email:"Clone_Email"};
+const REL_MAP    = {hub_name:"Hub_Name",facility_id:"Facility_ID",date:"Date",breach_base:"Breach_Base",ncd_breach_actual:"NCD_Breach_Actual",cd_breach_actual:"CD_Breach_Actual",total_breach_actual:"Total_Breach_Actual",repromise_breach_base:"Repromise_Breach_Base",repromise_breach_actual:"Repromise_Breach_Actual",ipd2_base:"IPD2_Base",ipd2_actual:"IPD2_Actual"};
+const EXP_MAP    = {hub_name:"Hub_Name",facility_id:"Facility_ID",date:"Date",fwd_closure:"Fwd_Closure",fwd_escalations:"Fwd_Escalations",rev_closure:"Rev_Closure",rev_escalations:"Rev_Escalations",escalations:"Escalations",escalations_base:"Escalations_Base",cxns:"CXNS",cxns_base:"CXNS_Base",d2pickup:"D2Pickup",total_pickup:"Total_Pickup"};
+const LOSS_MAP   = {hub_name:"Hub_Name",facility_id:"Facility_ID",date:"Date",prc_eligible:"PRC_Eligible",prc_done:"PRC_Done",pickup_loss:"Pickup_Loss",logistics_loss:"Logistics_Loss",fraud_loss:"Fraud_Loss"};
+const EFF_MAP    = {hub_name:"Hub_Name",facility_id:"Facility_ID",date:"Date",ofd:"OFD",ofd_8:"OFD_8",ofd_10:"OFD_10",delivered:"Delivered",unique_wm:"Unique_WM",otrs_live:"OTRS_Live",otrs_eligible:"OTRS_Eligible",otrs_shipments:"OTRS_Shipments",total_shipments:"Total_Shipments"};
+const COST_MAP   = {hub_name:"Hub_Name",facility_id:"Facility_ID",date:"Date",hi_arrival:"HI_Arrival",hmt_actual:"HMT_Actual",van_ofd:"Van_OFD",total_vans:"Total_Vans"};
+const TGT_MAP    = {facility_id:"Facility_ID",metric_name:"Metric_Name",target_value:"Target_Value",effective_from:"Effective_From",effective_to:"Effective_To"};
+
 const BOOTSTRAP_ADMIN = { email: "admin@flipkart.com", password: "admin123", name: "Admin", id: "ADMIN", role: "ADMIN", hasAdminAccess: true, hasDashAccess: false };
 
 // ITEM 1: IPD2+ split into DayStart + Clearance
@@ -1154,7 +1204,7 @@ function AdminPage({hier,userRows,mappingRows,cloneRows,onOrgUpload,rR,onRR,eR,o
   const handleOrgUpload=e=>{
     if(!xlsxReady){flash("❌ SheetJS still loading, please wait.");return;}
     const file=e.target.files[0];if(!file)return;const inp=e.target;const rd=new FileReader();
-    rd.onload=ev=>{try{
+    rd.onload=async ev=>{try{
       const wb=window.XLSX.read(ev.target.result,{type:"array"});
       const miss=["Employees","HI_Hub_Mapping","Access_Cloning"].filter(s=>!wb.SheetNames.includes(s));
       if(miss.length){flash("❌ Missing sheets: "+miss.join(", "));return;}
@@ -1168,15 +1218,22 @@ function AdminPage({hier,userRows,mappingRows,cloneRows,onOrgUpload,rR,onRR,eR,o
       const fail=mR.filter(r=>{const e=(r.HI_Email||"").toLowerCase().trim();return !allE.has(e)||!hiE.has(e);});
       setVal({uR,mR,pass,fail,allE,hiE,cR:cR2});
       onOrgUpload(uR,pass,cR2);
-      flash("✅ "+uR.length+" employees, "+pass.length+" valid mappings, "+cR2.length+" clones");
-    }catch{flash("❌ Failed to parse file.");}finally{inp.value="";}};
+      flash("⏳ Pushing org data to database…");
+      const toEmp  =uR.map(r=>({emp_name:r.Emp_Name,emp_designation:r.Emp_Designation,emp_email:r.Emp_Email,manager_name:r.Manager_Name,manager_designation:r.Manager_Designation,manager_email:r.Manager_Email}));
+      const toMap  =pass.map(r=>({hi_name:r.HI_Name,hi_email:r.HI_Email,hub_name:r.Hub_Name,facility_id:r.Facility_ID}));
+      const toClone=cR2.map(r=>({emp_name:r.Emp_Name,designation:r.Designation,emp_email:r.Emp_Email,clone_email:r.Clone_Email}));
+      await supaReplace("employees",toEmp);
+      await supaReplace("hi_hub_mapping",toMap);
+      await supaReplace("access_cloning",toClone);
+      flash("✅ "+uR.length+" employees, "+pass.length+" mappings, "+cR2.length+" clones saved to database.");
+    }catch(err){flash("❌ "+err.message);}finally{inp.value="";}};
     rd.readAsArrayBuffer(file);
   };
 
   const handleMetricsUpload=e=>{
     if(!xlsxReady){flash("❌ SheetJS still loading, please wait.");return;}
     const file=e.target.files[0];if(!file)return;const inp=e.target;const rd=new FileReader();
-    rd.onload=ev=>{try{
+    rd.onload=async ev=>{try{
       const wb=window.XLSX.read(ev.target.result,{type:"array"});
       const miss=["Reliability","Experience","Loss","Efficiency","Cost"].filter(s=>!wb.SheetNames.includes(s));
       if(miss.length){flash("❌ Missing sheets: "+miss.join(", "));return;}
@@ -1186,10 +1243,26 @@ function AdminPage({hier,userRows,mappingRows,cloneRows,onOrgUpload,rR,onRR,eR,o
       const efRows=parseSheet(wb,"Efficiency",EFFICIENCY_COLS).filter(r=>r.Facility_ID);
       const cRows=parseSheet(wb,"Cost",COST_COLS).filter(r=>r.Facility_ID);
       onRR(rRows);onER(eRows);onLR(lRows);onEfR(efRows);onCR(cRows);
-      let msg="✅ "+rRows.length+" Rel, "+eRows.length+" Exp, "+lRows.length+" Loss, "+efRows.length+" Eff, "+cRows.length+" Cost rows.";
-      if(wb.SheetNames.includes("Targets")){const tRows=parseSheet(wb,"Targets",TARGET_COLS).filter(r=>r.Facility_ID&&r.Metric_Name);onTR(tRows);msg+=" "+tRows.length+" target rows.";}
+      flash("⏳ Pushing metrics to database… this may take a minute for large files.");
+      const toRel =rRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,breach_base:r.Breach_Base||null,ncd_breach_actual:r.NCD_Breach_Actual||null,cd_breach_actual:r.CD_Breach_Actual||null,total_breach_actual:r.Total_Breach_Actual||null,repromise_breach_base:r.Repromise_Breach_Base||null,repromise_breach_actual:r.Repromise_Breach_Actual||null,ipd2_base:r.IPD2_Base||null,ipd2_actual:r.IPD2_Actual||null}));
+      const toExp =eRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,fwd_closure:r.Fwd_Closure||null,fwd_escalations:r.Fwd_Escalations||null,rev_closure:r.Rev_Closure||null,rev_escalations:r.Rev_Escalations||null,escalations:r.Escalations||null,escalations_base:r.Escalations_Base||null,cxns:r.CXNS||null,cxns_base:r.CXNS_Base||null,d2pickup:r.D2Pickup||null,total_pickup:r.Total_Pickup||null}));
+      const toLoss=lRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,prc_eligible:r.PRC_Eligible||null,prc_done:r.PRC_Done||null,pickup_loss:r.Pickup_Loss||null,logistics_loss:r.Logistics_Loss||null,fraud_loss:r.Fraud_Loss||null}));
+      const toEff =efRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,ofd:r.OFD||null,ofd_8:r.OFD_8||null,ofd_10:r.OFD_10||null,delivered:r.Delivered||null,unique_wm:r.Unique_WM||null,otrs_live:r.OTRS_Live||null,otrs_eligible:r.OTRS_Eligible||null,otrs_shipments:r.OTRS_Shipments||null,total_shipments:r.Total_Shipments||null}));
+      const toCost=cRows.map(r=>({hub_name:r.Hub_Name,facility_id:r.Facility_ID,date:r.Date||null,hi_arrival:r.HI_Arrival||null,hmt_actual:r.HMT_Actual||null,van_ofd:r.Van_OFD||null,total_vans:r.Total_Vans||null}));
+      await supaReplace("reliability",toRel);
+      await supaReplace("experience",toExp);
+      await supaReplace("loss",toLoss);
+      await supaReplace("efficiency",toEff);
+      await supaReplace("cost",toCost);
+      let msg="✅ "+rRows.length+" Rel, "+eRows.length+" Exp, "+lRows.length+" Loss, "+efRows.length+" Eff, "+cRows.length+" Cost rows saved to database.";
+      if(wb.SheetNames.includes("Targets")){
+        const tRows=parseSheet(wb,"Targets",TARGET_COLS).filter(r=>r.Facility_ID&&r.Metric_Name);
+        const toTgt=tRows.map(r=>({facility_id:r.Facility_ID,metric_name:r.Metric_Name,target_value:r.Target_Value||null,effective_from:r.Effective_From||null,effective_to:r.Effective_To||null}));
+        await supaReplace("targets",toTgt);
+        onTR(tRows); msg+=" "+tRows.length+" targets saved.";
+      }
       flash(msg);
-    }catch{flash("❌ Failed to parse file.");}finally{inp.value="";}};
+    }catch(err){flash("❌ "+err.message);}finally{inp.value="";}};
     rd.readAsArrayBuffer(file);
   };
 
@@ -1382,6 +1455,47 @@ function App() {
 
   const handleOrgUpload=(uR,mR,cR2)=>{ setUserRows(uR); setMappingRows(mR); setCloneRows(cR2); const built=buildHierarchyFromUsers(uR); if(built) setHier(built); };
 
+  // Load org + metrics from Supabase on first mount
+  const [dbLoading, setDbLoading] = useState(true);
+  const [dbStatus, setDbStatus] = useState("Loading data…");
+  useEffect(()=>{
+    (async()=>{
+      try {
+        setDbStatus("Loading organisation data…");
+        const [empRows, mapRows, cloneRows2] = await Promise.all([
+          supaFetchAll("employees"),
+          supaFetchAll("hi_hub_mapping"),
+          supaFetchAll("access_cloning"),
+        ]);
+        const uR    = empRows.map(r=>snakeToApp(r,EMP_MAP));
+        const mR    = mapRows.map(r=>snakeToApp(r,MAP_MAP));
+        const cR2   = cloneRows2.map(r=>snakeToApp(r,CLONE_MAP));
+        handleOrgUpload(uR, mR, cR2);
+
+        setDbStatus("Loading metrics data…");
+        const [relRows,expRows,lossRows,effRows,costRows,tgtRows] = await Promise.all([
+          supaFetchAll("reliability"),
+          supaFetchAll("experience"),
+          supaFetchAll("loss"),
+          supaFetchAll("efficiency"),
+          supaFetchAll("cost"),
+          supaFetchAll("targets"),
+        ]);
+        setRR(relRows.map(r=>snakeToApp(r,REL_MAP)));
+        setER(expRows.map(r=>snakeToApp(r,EXP_MAP)));
+        setLR(lossRows.map(r=>snakeToApp(r,LOSS_MAP)));
+        setEfR(effRows.map(r=>snakeToApp(r,EFF_MAP)));
+        setCR(costRows.map(r=>snakeToApp(r,COST_MAP)));
+        setTR(tgtRows.map(r=>snakeToApp(r,TGT_MAP)));
+        setDbStatus("Ready");
+      } catch(err) {
+        setDbStatus("⚠️ Could not load from database: "+err.message);
+      } finally {
+        setDbLoading(false);
+      }
+    })();
+  },[]);
+
   const doLogin=()=>{
     const email=login.email.trim().toLowerCase(), pw=login.password.trim();
     if(!email||!pw){setLoginErr("Enter email and password.");return;}
@@ -1423,8 +1537,10 @@ function App() {
             <input type={type} value={login[key]} placeholder={ph} onChange={e=>setLogin(p=>({...p,[key]:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&doLogin()} style={{width:"100%",marginTop:3,padding:"9px 11px",border:"1px solid #e5e7eb",borderRadius:7,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
           </div>
         ))}
+        {dbLoading&&<div style={{fontSize:11,color:"#6b7280",textAlign:"center",marginBottom:8,padding:"6px 10px",background:"#f3f4f6",borderRadius:6}}>⏳ {dbStatus}</div>}
+        {!dbLoading&&dbStatus.startsWith("⚠️")&&<div style={{fontSize:11,color:"#dc2626",marginBottom:8,padding:"6px 10px",background:"#fef2f2",borderRadius:6}}>{dbStatus}</div>}
         {loginErr&&<p style={{color:"#dc2626",fontSize:11,marginBottom:6}}>{loginErr}</p>}
-        <button onClick={doLogin} style={{width:"100%",padding:10,background:"#2563eb",color:"#fff",border:"none",borderRadius:7,fontSize:13,fontWeight:600,cursor:"pointer",marginTop:6}}>Sign In</button>
+        <button onClick={doLogin} disabled={dbLoading} style={{width:"100%",padding:10,background:dbLoading?"#93c5fd":"#2563eb",color:"#fff",border:"none",borderRadius:7,fontSize:13,fontWeight:600,cursor:dbLoading?"not-allowed":"pointer",marginTop:6}}>{dbLoading?"Loading data…":"Sign In"}</button>
       </div>
     </div>
   );
